@@ -21,7 +21,7 @@ const invoiceUploadService = {
     });
 
     try {
-      await Promise.allSettled(files.map(async (file) => {
+      const results = await Promise.allSettled(files.map(async (file) => {
         let uploadFileId: string | null = null;
         try {
           const objectKey = `${batch.id}/${randomUUID()}-${file.name}`;
@@ -42,16 +42,22 @@ const invoiceUploadService = {
           uploadFileId = uploadFile.id;
 
           const { result, usage, model } = await aiExtractionService.extractFromPdf(file.buffer);
+          console.log(`DEBUG [${file.name}]: AI extraction result:`, JSON.stringify(result));
           const draft = await invoiceDraftMappingService.mapToDraft(result);
+          console.log(`DEBUG [${file.name}]: Draft mapping result:`, JSON.stringify(draft));
 
           if (!draft) {
+            const reason = !result.invoice_number
+              ? 'No invoice_number could be extracted'
+              : 'Mapping failed (e.g. invalid dates or missing data)';
+            console.log(`DEBUG [${file.name}]: ${reason}, marking as failed`);
             await invoiceUploadRepository.updateFile(uploadFileId, {
               processing_status: 'failed',
-              error_message: 'No invoice_number could be extracted — cannot create draft',
+              error_message: reason,
               extraction_result: JSON.stringify(result),
               processing_completed_at: new Date(),
             });
-            return;
+            return { status: 'failed' };
           }
 
           const invoice = await db.transaction().execute(async (trx) => {
@@ -99,6 +105,7 @@ const invoiceUploadService = {
             total_tokens: usage?.total_tokens ?? null,
             processing_completed_at: new Date(),
           });
+          return { status: 'success' };
         } catch (error) {
           if (uploadFileId) {
             await invoiceUploadRepository.updateFile(uploadFileId, {
@@ -111,7 +118,27 @@ const invoiceUploadService = {
         }
       }));
 
-      await invoiceUploadRepository.updateBatch(batch.id, { status: 'completed' });
+      const anySucceeded = results.some(r => r.status === 'fulfilled' && (r.value as any)?.status === 'success');
+      const allFailed = results.every(r => r.status === 'rejected' || (r.status === 'fulfilled' && (r.value as any)?.status === 'failed'));
+
+      console.log('DEBUG: batch processing results:', {
+        anySucceeded,
+        allFailed,
+        totalFiles: files.length,
+        fulfilledCount: results.filter(r => r.status === 'fulfilled').length,
+        rejectedCount: results.filter(r => r.status === 'rejected').length,
+      });
+
+      if (anySucceeded) {
+        console.log('DEBUG: Marking batch as completed (at least one success)');
+        return await invoiceUploadRepository.updateBatch(batch.id, { status: 'completed' });
+      } else {
+        console.log('DEBUG: Marking batch as failed (no successes)');
+        return await invoiceUploadRepository.updateBatch(batch.id, {
+          status: 'failed',
+          error_message: allFailed ? 'All files in batch failed to process' : 'Batch processed but no files were successfully extracted'
+        });
+      }
     } catch (error) {
       await invoiceUploadRepository.updateBatch(batch.id, {
         status: 'failed',

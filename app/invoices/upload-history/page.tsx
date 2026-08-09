@@ -57,11 +57,15 @@ function UploadHistoryPageInner() {
 
   // 2. Fetch specific files when clicking "View Files" or passing editId
   const openBatch = useCallback(async (batchId: string) => {
+    console.log('DEBUG: Opening batch:', batchId);
     setViewingBatchId(batchId);
     setFilesLoading(true);
     try {
-      setFiles(await apiFetch<UploadFile[]>(`/api/invoice-uploads/${batchId}`));
+      const data = await apiFetch<UploadFile[]>(`/api/invoice-uploads/${batchId}`);
+      console.log('DEBUG: Received files for batch:', batchId, data);
+      setFiles(data);
     } catch (e) {
+      console.error('DEBUG: Error fetching files for batch:', batchId, e);
       message.error((e as Error).message);
     } finally {
       setFilesLoading(false);

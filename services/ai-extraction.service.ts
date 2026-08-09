@@ -21,7 +21,7 @@ export interface ExtractedInvoice {
   }>;
 }
 
-const PROMPT = `Extract key information from this NDIS invoice PDF into structured JSON with exactly this shape:
+const PROMPT = `Extract key information from the following NDIS invoice text into structured JSON with exactly this shape:
 {
   "participant_name": string or null,
   "participant_ndis_number": string or null,
@@ -39,11 +39,11 @@ const PROMPT = `Extract key information from this NDIS invoice PDF into structur
     "support_item_number": string or null
   }]
 }
-Respond with ONLY the JSON object, no markdown formatting, no explanation. Use null for any field that cannot be determined from the document.`;
+Respond with ONLY the JSON object, no markdown formatting, no explanation. Use null for any field that cannot be determined from the document.
 
-/**
- * Lazy helper to initialize the OpenAI client on-demand rather than at top-level module import time.
- */
+Invoice Text:
+`;
+
 function getClientAndModel() {
   const openRouterKey = process.env.OPENROUTER_API_KEY;
   const openAiKey = process.env.OPENAI_API_KEY;
@@ -61,23 +61,49 @@ function getClientAndModel() {
   };
 }
 
+async function extractTextFromPdf(buffer: Buffer): Promise<string> {
+  // Polyfill DOMMatrix and import pdfjs dynamically to avoid build-time ReferenceErrors in Node.js
+  if (typeof global.DOMMatrix === 'undefined') {
+    (global as any).DOMMatrix = class DOMMatrix {
+      constructor() {}
+      multiply() { return this; }
+      fromFloat32Array() { return this; }
+      fromFloat64Array() { return this; }
+      fromMatrix() { return this; }
+    };
+  }
+  try {
+    const pdfjs = await import('pdfjs-dist');
+    pdfjs.GlobalWorkerOptions.workerSrc = 'pdfjs-dist/build/pdf.worker.js';
+
+    const data = new Uint8Array(buffer);
+    const loadingTask = pdfjs.getDocument({ data });
+    const pdfDocument = await loadingTask.promise;
+    let text = '';
+    for (let i = 1; i <= pdfDocument.numPages; i++) {
+      const page = await pdfDocument.getPage(i);
+      const textContent = await page.getTextContent();
+      text += textContent.items.map((item: any) => item.str).join(' ') + '\n';
+    }
+    return text;
+  } catch (error) {
+    console.error('ERROR: PDF text extraction failed:', error);
+    throw new Error(`PDF extraction failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 const aiExtractionService = {
   async extractFromPdf(pdfBuffer: Buffer): Promise<{ result: ExtractedInvoice; usage: OpenAI.CompletionUsage | undefined; model: string }> {
     const { client, model } = getClientAndModel();
-    const base64 = pdfBuffer.toString('base64');
+
+    const text = await extractTextFromPdf(pdfBuffer);
 
     const response = await client.chat.completions.create({
       model,
       messages: [
         {
           role: 'user',
-          content: [
-            { type: 'text', text: PROMPT },
-            {
-              type: 'file' as any,
-              file: { filename: 'invoice.pdf', file_data: `data:application/pdf;base64,${base64}` },
-            } as any,
-          ],
+          content: PROMPT + text,
         },
       ],
     });
